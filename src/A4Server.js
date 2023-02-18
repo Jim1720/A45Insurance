@@ -2,11 +2,27 @@
 
 // A45Server
 
+// 2/7/23: email change
+//
+// o check email pattern when registering for error
+// o if good return the pattern for client update checks edits. 
+//
+//   A45EmailPattern
+//
+// SETX A45EmailPattern "^[0-9a-zA-Z]+@[0-9a-zA-Z]+\.[0-9a-zA-Z]+$"
+//
+// o comment out show() in update logic
+// 
+// source: 2.27.23 - move to prod so A80 will have customer returned on signin.
+//
+
+
 "use strict";
 
 var sql = require("msnodesqlv8");   
  
 s("environment variables are being checked..."); 
+ 
  
  var p = {};
  p.server = process.env.A45Server;
@@ -16,6 +32,8 @@ s("environment variables are being checked...");
  p.base = process.env.A45Database;
  p.mode = process.env.A45Mode;   
  p.display = process.env.A45Display; 
+ p.emailpattern = process.env.A45EmailPattern;
+
  // in production: set variable to 'p'.
  if (process.env.A45Port === 'p') {
  
@@ -31,10 +49,10 @@ s("environment variables are being checked...");
  p.private = process.env.A45Private; 
  p.eId = process.env.A45AdminId;
  p.ePw = process.env.A45AdminPassword;
- p.promo = process.env.A45PromotionCode;
- p.emailList = process.env.A45EmailList;
+ p.promo = process.env.A45PromotionCode; 
  p.bypassToken = process.env.A45BypassToken;
  p.mode = process.env.A45Mode; 
+ p.emailpattern = process.env.A45EmailPattern
  
  var haveToStop = false;
 for(var a in p) {
@@ -68,6 +86,9 @@ if (p.mode === "Test") {
     for(var a in p) {
         console.log("variable " + a + " is " + p[a] + ".");
     }
+    console.log("Version 1.28.23 - email syntax is checked a@b.c on customer add only.")
+    console.log("Version 2.14.23 - read 'A45EmailPattern' environment variable and return in signin, sigin70 and register.") 
+     
 }
  
 // activate oprational displays in test mode.
@@ -311,7 +332,8 @@ console.log('debug only ' + connectionString);
 app.get('/readServices', function(req,res) { 
 
 var services = [];
- 
+
+console.log('debug only ' + connectionString);
  
 var plans = []; 
 
@@ -363,6 +385,69 @@ sql.open(connectionString, function(err,con) {
    });
 
 });
+
+app.get('/readPlan', function(req, res) {
+
+
+    var custId = req.query.id;
+    s('reading plan.');
+
+    sql.open(connectionString, function(err,con) { 
+
+        if(err) { showError("a40 - server - failed to connect: " + err.message  
+        , "server error",[connectionString],res,err); return; }; 
+
+        var pm = con.procedureMgr();
+        pm.callproc('[dbo].[ReadPlan]', 
+                     [custId], 
+                     function(err,results, output) {
+
+            if(err) {  
+                s('plan error: ' + err.message)
+                showError('a40 - server - cust read fails: ' + err.message,
+                'server error',['read customer'],res,err);
+                return;
+            }  
+            var plan = results[0];
+            if(plan  == null) {
+                s('read customer plan: null  result returned'); 
+                var regObject = {Status: 'Unsuccessful', Message: 'Customer not found.', Token: null, Customer: null };
+                var json = JSON.stringify(regObject);
+                res.status(200);
+                res.send(json);   
+                return;
+            }
+            
+            // check edit failure for dup or non-existing from custId. 
+            var returnCode = output[0];
+            // OK , Duplicate, Missing will be output.
+            var result = { code: 0, message: '' };
+            s('read plan:procedure return code:' + output[0]);
+            result.code = returnCode;
+            if(result.code !== 0) { 
+
+                s('read customer plan: result code not zero. it:' + result.code); 
+                var regObject = {Status: 'Unsuccessful', Message: 'Customer not found.' + result.code, Token: null, Customer: null };
+                var json = JSON.stringify(regObject);
+                res.status(200);
+                res.send(json);   
+                return;
+            }
+ 
+            s('customer plan found :' + result.code); 
+            var regObject = {Status: 'Successful', Message: 'OK' , Token: null, Plan: plan };
+            var json = JSON.stringify(regObject);
+            res.status(200);
+            res.send(json);   
+            return;
+
+        });
+  
+    });
+
+
+});
+ 
  
 
 // read environment
@@ -500,13 +585,13 @@ app.get('/cust', function(req,res) {
   
 
 }); 
-
+// 
 
 
 app.get('/signin', function(req,res) { 
 
     // used for cust lookup  - send token back if cust is found 
-    s("/register action checking auth.");
+    s("/signin action checking auth.");
      
     var message = null; 
     var id = req.query.id;
@@ -573,11 +658,18 @@ app.get('/signin', function(req,res) {
                  res.send(json);  
                  return; 
               } 
+
+              // cust is not passed only request query for id and pw.
+              // populate cust fields now since caller needs first last name etc.
   
               // authenticated , continue.
-             var token = collectToken();
-             var regObject = {Status: 'Successful', Message: 'OK', Token: token, Customer: cust };
-             var json = JSON.stringify(regObject);
+             var token = collectToken(); 
+             var emailPattern = process.env.A45EmailPattern;
+             s('signin email pattern is:' + emailPattern);
+             var signInObject = {Status: 'Successful', Message: 'OK', Token: token, Customer: cust, EmailPattern: emailPattern }; 
+             s('signin object is :' + signInObject);
+             var json = JSON.stringify(signInObject);
+             s('signin object json string is:' + json);
              res.send(json);  
              return;
  
@@ -652,7 +744,16 @@ app.post('/register', function(req,res) {
     } 
 
     // check email
-    if(!process.env.A45EmailList.includes(eMail)) {
+    //const emailPattern = "^[0-9a-zA-Z]+@[0-9a-zA-Z]+\.[0-9a-zA-Z]+$";
+
+    // note: once registration succeeds the ePattern given to client for
+    // subseuent edits when update occurs.
+
+    var emailPattern = process.env.A45EmailPattern;
+    var checkEmail = eMail.match(emailPattern); 
+    s('checking email emailPattern/A45EmailPattern is:')
+    s(emailPattern)
+    if (checkEmail == null) {
         s('-> invalid e-mail.');
         res.status(200);
         var regObject = {Status: 'Unsuccessful', Message: 'Invalid E-mail used.', Token: null, Customer: null };
@@ -719,12 +820,19 @@ app.post('/register', function(req,res) {
             // send matching customeromer object back 
             s('successful addition');  
             s('collecting token');
-            var token = collectToken();
+            var token = collectToken(); 
+            s('collecting email pattern');
+            // email pattern
+            var emailPattern = process.env.A45EmailPattern;
+            s(emailPattern)
             s('setting status');
             res.status(200); 
-            s('sending');
-            var regObject = {Status: 'Successful', Message: 'OK', Token: token, Customer: req.body };
+            s('sending'); 
+            var regObject = {Status: 'Successful', Message: 'OK', Token: token, Customer: req.body,
+                            EmailPattern: emailPattern};
             var json = JSON.stringify(regObject);
+            s("register - sending the followng json:")
+            s(json)
             res.send(json);    
 
         });
@@ -760,10 +868,8 @@ app.put('/update', function(req,res) {
        return res('bad body');
     }
 
-    show(req.body);
-    show('parm 3');
-    show('.' + req.body.custFirst + '.');
-    
+    // show(req.body);   
+
     sql.open(connectionString, function(err,con) {
 
         if(err) { showError("a40 - server - failed to connect: " + err.message  
@@ -812,7 +918,14 @@ app.put('/update', function(req,res) {
 
             s('successful update of customer');
             res.status(200) 
-            res.send(res.body) 
+            //res.send(res.body) 
+
+            // callers must check staus and print message if
+            // status is unsuccesful for emai edit  above.
+
+            var regObject = {Status: 'Successful', Message: 'Good Upadte', Token: null, Customer: req.body };
+            var json = JSON.stringify(regObject);
+            res.send(json);  
         });
   
     });
